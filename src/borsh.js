@@ -107,46 +107,113 @@ export function parseQuoteSendResponse(returnData) {
 // ── Compose message for adaptive chains ──────
 /**
  * Encode the compose message payload for a legacy→adaptive hop.
- * This is the payload that gets executed on Arbitrum to forward to the final chain.
  *
- * USDT0 Arbitrum OFT compose receiver expects ABI-encoded:
- *   (uint32 dstEid, bytes32 to, uint256 minAmountLD, bytes extraOptions)
+ * The USDT0 Adaptive Bridge on Arbitrum (0x759BA420...) receives this as its
+ * lzCompose `_message` param. It decodes it as a full SendParam struct and
+ * uses the NEW Arb OFT to execute leg 2 to the native USDT0 OFT chain.
+ *
+ * Format: abi.encode(SendParam sendParam)
+ *   SendParam = (uint32 dstEid, bytes32 to, uint256 amountLD,
+ *                uint256 minAmountLD, bytes extraOptions, bytes composeMsg, bytes oftCmd)
+ *
+ * Since SendParam contains dynamic fields (bytes), abi.encode() prepends a 32-byte
+ * offset (0x20) before the tuple, per Solidity ABI spec.
+ *
+ * Verified against on-chain example tx JUjUi5NiajNJCqqwQTA75R1Mz14BmBUJTwXK77HXyZ2...
  *
  * @param {number} finalEid      - destination chain EID (e.g. Berachain 30362)
  * @param {string} finalReceiver - 0x address on final chain
+ * @param {bigint} amountLd      - token amount (same as sent, 6 decimals)
  * @param {bigint} minAmountLd   - min tokens on final chain
- * @param {Buffer} extraOptions  - LZ options for final hop (usually empty)
+ * @param {Buffer} extraOptions  - LZ options for final hop (e.g. native drop)
  */
-export function encodeComposeMsg(finalEid, finalReceiver, minAmountLd, extraOptions = Buffer.alloc(0)) {
-  // ABI encode: (uint32, bytes32, uint256, bytes)
-  // We use manual ABI encoding (no ethers dependency needed here)
-  // Slot layout (each 32 bytes):
-  //  [0] uint32 dstEid (left-padded)
-  //  [1] bytes32 to
-  //  [2] uint256 minAmountLD
-  //  [3] offset to `bytes` (= 4 * 32 = 128)
-  //  [4] bytes length
-  //  [5+] bytes data (padded to 32)
+export function encodeComposeMsg(finalEid, finalReceiver, amountLd, minAmountLd, extraOptions = Buffer.alloc(0)) {
+  function word32(n) {
+    const b = Buffer.alloc(32);
+    const big = BigInt(n);
+    // write as big-endian u256 (right-justified)
+    b.writeBigUInt64BE(big >> 64n, 16);
+    b.writeBigUInt64BE(big & 0xffffffffffffffffn, 24);
+    return b;
+  }
+  function word32u32(n) {
+    const b = Buffer.alloc(32);
+    b.writeUInt32BE(n, 28);
+    return b;
+  }
 
-  const eidBuf = Buffer.alloc(32);
-  eidBuf.writeUInt32BE(finalEid, 28);
+  const toBuf = evmAddressTo32(finalReceiver);  // bytes32 to
 
-  const toBuf = evmAddressTo32(finalReceiver);
+  // ABI head: 7 fields (4 static + 3 dynamic offsets), relative to tuple start
+  const HEAD_SIZE = 7 * 32;  // 224 bytes
+  const extraOptsPaddedLen = Math.ceil(extraOptions.length / 32) * 32;
 
-  const minAmtBuf = Buffer.alloc(32);
-  minAmtBuf.writeBigUInt64BE(minAmountLd, 24);
+  // Offsets are relative to the START OF THE TUPLE (not including the outer 0x20 word)
+  const extraOptsOffset  = HEAD_SIZE;                                    // 224
+  const composeMsgOffset = HEAD_SIZE + 32 + extraOptsPaddedLen;          // 224 + 32 + ceil(extraLen/32)*32
+  const oftCmdOffset     = composeMsgOffset + 32;                        // composeMsg.length=0, so +32
 
-  const offsetBuf = Buffer.alloc(32);
-  offsetBuf.writeUInt32BE(128, 28);  // offset = 4 slots * 32
+  // Outer ABI offset word (because the struct is dynamic)
+  const outerOffset = word32u32(32);  // 0x20
 
-  const lenBuf = Buffer.alloc(32);
-  lenBuf.writeUInt32BE(extraOptions.length, 28);
+  // Static fields
+  const dstEidWord   = word32u32(finalEid);
+  const amountWord   = word32(amountLd);
+  const minAmtWord   = word32(minAmountLd);
 
-  // Pad extraOptions to 32-byte boundary
-  const padded = Buffer.alloc(Math.ceil(extraOptions.length / 32) * 32);
-  extraOptions.copy(padded);
+  // Offset words
+  const extraOptsOffsetWord  = word32u32(extraOptsOffset);
+  const composeMsgOffsetWord = word32u32(composeMsgOffset);
+  const oftCmdOffsetWord     = word32u32(oftCmdOffset);
 
-  return Buffer.concat([eidBuf, toBuf, minAmtBuf, offsetBuf, lenBuf, padded]);
+  // Dynamic data
+  const extraOptsLen = Buffer.alloc(32);
+  extraOptsLen.writeUInt32BE(extraOptions.length, 28);
+  const extraOptsPadded = Buffer.alloc(extraOptsPaddedLen);
+  extraOptions.copy(extraOptsPadded);
+
+  const composeMsgLen = Buffer.alloc(32);  // composeMsg = empty bytes
+  const oftCmdLen     = Buffer.alloc(32);  // oftCmd = empty bytes
+
+  return Buffer.concat([
+    outerOffset,
+    dstEidWord, toBuf, amountWord, minAmtWord,
+    extraOptsOffsetWord, composeMsgOffsetWord, oftCmdOffsetWord,
+    extraOptsLen, extraOptsPadded,
+    composeMsgLen,
+    oftCmdLen,
+  ]);
+}
+
+// ── LZ Native Drop option ─────────────────────
+/**
+ * Encode a NATIVE_DROP option for LZ V2 Type 3 options.
+ * Drops a small amount of native token to the receiver on the destination chain.
+ *
+ * @param {bigint}  amount    - amount of native token to drop (in wei)
+ * @param {string}  receiver  - 0x EVM address to receive the native drop
+ */
+export function encodeLzNativeDropOption(amount, receiver) {
+  // Option data: [type=2:1][amount:16][receiver:32] = 49 bytes
+  const optionData = Buffer.alloc(49);
+  optionData[0] = 2;  // OPTION_TYPE_NATIVE_DROP
+  // amount as u128 BE (16 bytes): high 8 + low 8
+  optionData.writeBigUInt64BE(0n, 1);
+  optionData.writeBigUInt64BE(BigInt(amount), 9);
+  // receiver as bytes32 (32 bytes, left-zero-padded)
+  const receiverBuf = evmAddressTo32(receiver);
+  receiverBuf.copy(optionData, 17);
+
+  // Worker block: [workerID=1][optionLen:u16 BE][optionData]
+  const block = Buffer.alloc(3);
+  block[0] = 1;  // Executor worker ID
+  block.writeUInt16BE(optionData.length, 1);  // 49
+
+  return Buffer.concat([
+    Buffer.from([0x00, 0x03]),  // Type 3 header
+    block,
+    optionData,
+  ]);
 }
 
 // ── LZ V2 options encoding ───────────────────

@@ -44,15 +44,31 @@ export const EID = {
 };
 
 // USDT0 OFT addresses on EVM chains
-// NOTE: Verified against on-chain peer registrations.
-// Adaptive routing (Solana→Arb→X) only works for chains that ARE peers on Arb USDT0:
-//   ETH ✅, Celo ✅, TON ✅, Tron ✅  |  Berachain ❌, Base ❌, Optimism ❌
+// There are TWO Arbitrum OFTs:
+//   OLD_ARB_OFT: 0x77652d5A... — Legacy Mesh hub (peers: ETH, Solana, Celo, TON, Tron)
+//   NEW_ARB_OFT: 0x14E4A1B1... — Native OFT proxy (peers: Berachain, Optimism, Polygon, etc.)
+//
+// Adaptive routing (Solana → native USDT0 OFT chains) path:
+//   Solana → OLD_ARB_OFT (leg 1, with composeMsg)
+//            ↓ lzCompose on ADAPTIVE_BRIDGE_ARB
+//   ADAPTIVE_BRIDGE_ARB → NEW_ARB_OFT → Berachain/etc (leg 2)
 export const EVM_OFT = {
   [EID.ETH]:       '0x6c96dE32CEa08842dcc4058c14d3aaAD7Fa41ef',
-  [EID.ARBITRUM]:  '0x77652d5Aba086137b595875263Fc200182919B92',
+  [EID.ARBITRUM]:  '0x77652d5Aba086137b595875263Fc200182919B92',  // OLD ARB OFT (Legacy Mesh)
   [EID.CELO]:      '0xf10e161027410128e63e75d0200fb6d34b2db243',
-  [EID.BERACHAIN]: '0x779B8B8B98E39E15D937A4E6B16dDc3e07E21E29',  // update if needed
+  [EID.BERACHAIN]: '0x3dc96399109df5ceb2c226664a086140bd0379cb',  // verified from LZ Scan
 };
+
+// NEW Arbitrum OFT — connects to native USDT0 OFT chains (Berachain, Optimism, etc.)
+// Used for quoting leg 2 fee (Arb → Berachain)
+export const NEW_ARB_OFT = '0x14E4A1B13bf7f943c8ff7c51fb60fa964a298d92';
+
+// USDT0 Adaptive Bridge on Arbitrum
+// This contract is the compose receiver for adaptive sends.
+// Leg 1 sends to this address (it receives tokens + lzCompose is called on it).
+// Its lzCompose handler decodes the SendParam and forwards via NEW_ARB_OFT.
+// Verified from on-chain: example tx JUjUi5... used this address.
+export const ADAPTIVE_BRIDGE_ARB = '0x759BA420bF1ded1765F18C2DC3Fc57A1964A2Ad1';
 
 // USDT0 decimals = 6
 export const DECIMALS = 6;
