@@ -44,9 +44,13 @@ export const EID = {
 };
 
 // USDT0 OFT addresses on EVM chains
+// NOTE: Verified against on-chain peer registrations.
+// Adaptive routing (Solana→Arb→X) only works for chains that ARE peers on Arb USDT0:
+//   ETH ✅, Celo ✅, TON ✅, Tron ✅  |  Berachain ❌, Base ❌, Optimism ❌
 export const EVM_OFT = {
   [EID.ETH]:       '0x6c96dE32CEa08842dcc4058c14d3aaAD7Fa41ef',
   [EID.ARBITRUM]:  '0x77652d5Aba086137b595875263Fc200182919B92',
+  [EID.CELO]:      '0xf10e161027410128e63e75d0200fb6d34b2db243',
   [EID.BERACHAIN]: '0x779B8B8B98E39E15D937A4E6B16dDc3e07E21E29',  // update if needed
 };
 

@@ -1,17 +1,24 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-//  USDT0 OFT — Send from Solana to an ADAPTIVE chain (e.g. Berachain)
+//  USDT0 OFT — Send from Solana to an ADAPTIVE chain (Celo)
 //
 //  Adaptive chains cannot receive directly from Solana.
-//  Path: Solana → Arbitrum (leg 1) → Berachain (leg 2)
+//  Path: Solana → Arbitrum (leg 1) → Celo (leg 2)
 //
 //  Implementation:
 //    - Leg 1: OFT.send( dstEid=ARBITRUM, to=ARBITRUM_OFT, composeMsg=<leg2> )
 //    - Leg 2: encoded in composeMsg — Arbitrum OFT executes another send
-//             to Berachain upon receiving the compose message
+//             to Celo upon receiving the compose message
 //
-//  The compose message payload is ABI-encoded and interpreted by the
-//  USDT0 compose receiver on Arbitrum (0x77652d5a...).
+//  Valid adaptive destinations (peers on Arb USDT0):
+//    ETH (30101) ✅, Celo (30125) ✅, TON (30343) ✅, Tron (30420) ✅
+//    Berachain ❌, Base ❌, Optimism ❌  (not configured on Arb)
+//
+//  Key parameters for the lzCompose option:
+//    - gas:   executor gas for lzCompose call on Arbitrum (≥ 500k for safety)
+//    - value: ETH to forward as msg.value to the compose callback, which the
+//             compose receiver uses to pay the leg 2 LZ fee.
+//             Must be quoted from the Arbitrum USDT0 OFT's quoteSend().
 // ═══════════════════════════════════════════════════════════════
 import {
   Connection, Keypair, PublicKey,
@@ -23,21 +30,69 @@ import { EID, EVM_OFT, PROGRAMS } from '../src/constants.js';
 import { encodeSendParams, evmAddressTo32, encodeComposeMsg, encodeLzComposeOption } from '../src/borsh.js';
 import { buildSendAccounts } from '../src/accounts.js';
 import { quoteSend } from '../src/quote.js';
-import { getOftStore, getOftEventAuthority } from '../src/pda.js';
+import { getOftEventAuthority } from '../src/pda.js';
 
 // ── Config ────────────────────────────────────
 const RPC         = 'https://api.mainnet-beta.solana.com';
+const ARB_RPC     = 'https://arb1.arbitrum.io/rpc';
 const WALLET_PATH = '/root/usdt0-poc/test-wallet.json';
 
-// Leg 1: Solana → Arbitrum
+// Route: Solana → Arbitrum (leg 1) → Celo (leg 2)
 const LEG1_DST_EID = EID.ARBITRUM;
-// Leg 2: Arbitrum → Berachain
-const FINAL_EID    = EID.BERACHAIN;
+const FINAL_EID    = EID.CELO;
 const DST_ADDR     = '0x8b5b3F18db50713709da94f88f9f5EEc339D1E4E';  // your EVM wallet
 
-// Amount: 0.001 USDT
+// Amount: 0.001 USDT (6 decimals = 1000 units)
 const AMOUNT_LD  = 1000n;
-const SLIPPAGE   = 990n;   // 1% slippage tolerance
+const SLIPPAGE   = 990n;  // 1% slippage
+
+// quoteSend function selector on EVM OFT
+// keccak256("quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)")[0:4]
+const QUOTE_SEND_SEL = '0x3b6f743b';
+
+// ── Quote leg 2 fee (Arb → Celo) via eth_call ─────────────────
+/**
+ * Query the Arbitrum USDT0 OFT's quoteSend to get the fee for the second hop.
+ * The compose receiver on Arbitrum uses msg.value to pay this fee.
+ * Returns the nativeFee in wei (as bigint).
+ */
+async function quoteLeg2Fee(finalEid, toAddr, amountLd, minAmountLd) {
+  // ABI encode SendParam tuple manually (no ethers dependency)
+  // (uint32,bytes32,uint256,uint256,bytes,bytes,bytes)
+  function pad32(n) { return n.toString(16).padStart(64, '0'); }
+  const tupleHead =
+    pad32(finalEid) +                                        // dstEid
+    toAddr.toLowerCase().replace('0x','').padStart(64,'0') + // to (bytes32)
+    pad32(Number(amountLd)) +                                // amountLD
+    pad32(Number(minAmountLd)) +                             // minAmountLD
+    pad32(7 * 32) +                                          // extraOptions offset = 7*32=224
+    pad32(7 * 32 + 32) +                                     // composeMsg offset = 256
+    pad32(7 * 32 + 64) +                                     // oftCmd offset = 288
+    pad32(0) +                                               // extraOptions.length = 0
+    pad32(0) +                                               // composeMsg.length = 0
+    pad32(0);                                                // oftCmd.length = 0
+
+  const calldata =
+    QUOTE_SEND_SEL +
+    pad32(64) +      // offset to SendParam = 64
+    pad32(0) +       // bool payInLzToken = false
+    tupleHead;
+
+  const res = await fetch(ARB_RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'eth_call',
+      params: [{ to: EVM_OFT[LEG1_DST_EID], data: calldata }, 'latest'],
+    }),
+  }).then(r => r.json());
+
+  if (res.error) throw new Error(`quoteLeg2 RPC error: ${res.error.message}`);
+
+  // Decode result: MessagingFee { nativeFee: uint256, lzTokenFee: uint256 }
+  const nativeFeeHex = res.result.slice(2, 66);   // first 32 bytes
+  return BigInt('0x' + nativeFeeHex);
+}
 
 // ── Main ──────────────────────────────────────
 async function main() {
@@ -46,70 +101,65 @@ async function main() {
     new Uint8Array(JSON.parse(readFileSync(WALLET_PATH, 'utf8'))),
   );
   console.log('Wallet:', kp.publicKey.toString());
-  console.log(`\nRoute: Solana → Arbitrum (EID ${LEG1_DST_EID}) → Berachain (EID ${FINAL_EID})`);
+  console.log(`\nRoute: Solana → Arbitrum (EID ${LEG1_DST_EID}) → Celo (EID ${FINAL_EID})`);
 
-  // ── 1. Build compose message (leg 2 payload) ─
-  console.log('\n[1/5] Building compose message for leg 2...');
-  // This ABI-encoded payload is executed by the compose receiver on Arbitrum.
-  // It tells Arbitrum USDT0 OFT to forward tokens to Berachain.
+  // ── 1. Quote leg 2 fee (Arb → Celo) ─────────
+  console.log('\n[1/6] Quoting leg 2 fee (Arbitrum → Celo)...');
+  const leg2FeeWei = await quoteLeg2Fee(FINAL_EID, DST_ADDR, AMOUNT_LD, SLIPPAGE);
+  const leg2FeeWithBuffer = leg2FeeWei * 150n / 100n;  // 50% buffer
+  console.log(`  Leg 2 fee: ${leg2FeeWei} wei (${Number(leg2FeeWei)/1e18} ETH)`);
+  console.log(`  With 50% buffer: ${leg2FeeWithBuffer} wei`);
+
+  // ── 2. Build compose message (leg 2 payload) ─
+  console.log('\n[2/6] Building compose message for leg 2...');
   const composeMsg = encodeComposeMsg(
-    FINAL_EID,        // final destination: Berachain
+    FINAL_EID,        // final destination: Celo
     DST_ADDR,         // final recipient
-    SLIPPAGE,         // minAmountLD on final chain
+    SLIPPAGE,         // minAmountLD on Celo
     Buffer.alloc(0),  // no extra options for second hop
   );
   console.log(`  Compose msg (${composeMsg.length} bytes): ${composeMsg.toString('hex').slice(0, 64)}...`);
 
-  // ── 1b. Build extra_options with lzCompose ──
-  // The enforced options for send_and_call only include lzReceive(200k gas).
-  // Without a lzCompose option, the executor delivers the packet to Arbitrum but
-  // never triggers the compose call. We must include it in extra_options.
-  //
-  // LZ V2 Type 3 format: [0x0003][worker blocks...]
-  // lzCompose(index=0, gas=500_000): tells executor to run compose with 500k gas
-  const extraOptions = encodeLzComposeOption(0, 500_000n, 0n);
+  // ── 3. Build extra_options with lzCompose ────
+  // The enforced options for send_and_call only have lzReceive(200k gas).
+  // We must add lzCompose(index=0, gas=500k, value=leg2FeeWithBuffer) so that:
+  //   - The executor triggers the compose callback after lzReceive
+  //   - The leg2FeeWithBuffer ETH is forwarded as msg.value to the compose callback
+  //   - The compose receiver uses msg.value to pay the Arb→Celo LZ fee
+  const extraOptions = encodeLzComposeOption(0, 500_000n, leg2FeeWithBuffer);
   console.log(`  Extra options (${extraOptions.length} bytes): ${extraOptions.toString('hex')}`);
+  console.log(`  lzCompose value: ${leg2FeeWithBuffer} wei (${Number(leg2FeeWithBuffer)/1e18} ETH)`);
 
-  // ── 2. Quote fee for leg 1 ──────────────────
-  console.log('\n[2/5] Quoting fee for leg 1 (Solana → Arbitrum with compose)...');
-
-  // The "to" for leg 1 is the Arbitrum OFT contract (32-byte padded)
+  // ── 4. Quote leg 1 fee (Solana → Arbitrum) ──
+  console.log('\n[4/6] Quoting leg 1 fee (Solana → Arbitrum with compose)...');
   const arbOftAddr = EVM_OFT[LEG1_DST_EID];
-  console.log(`  Sending to Arbitrum OFT: ${arbOftAddr}`);
+  console.log(`  Leg 1 recipient (Arb OFT): ${arbOftAddr}`);
 
-  // Pass composeMsg so the fee quote reflects the message type (SendOFTAndCall)
-  // and pass extraOptions so the fee accounts for compose execution gas
-  const { nativeFee, lzFee } = await quoteSend(
+  const { nativeFee } = await quoteSend(
     connection, LEG1_DST_EID, arbOftAddr, AMOUNT_LD, composeMsg, kp.publicKey, extraOptions,
   );
-  console.log(`  Native fee: ${nativeFee} lamports (${Number(nativeFee)/1e9} SOL)`);
-
-  if (nativeFee === 0n) {
-    throw new Error('Fee quote returned 0 — check simulation. composeMsg might be wrong format.');
-  }
+  if (nativeFee === 0n) throw new Error('Leg 1 fee quote returned 0 — simulation may have failed.');
 
   const nativeFeeWithBuffer = nativeFee * 110n / 100n;
-  console.log(`  Fee with 10% buffer: ${nativeFeeWithBuffer} lamports`);
+  console.log(`  Leg 1 fee: ${nativeFee} lamports (${Number(nativeFee)/1e9} SOL)`);
+  console.log(`  With 10% buffer: ${nativeFeeWithBuffer} lamports`);
 
-  // ── 3. Build accounts ───────────────────────
-  console.log('\n[3/5] Resolving accounts for leg 1...');
+  // ── 5. Build accounts + instruction ─────────
+  console.log('\n[5/6] Resolving accounts and building instruction...');
   const { coreAccounts, remainingAccounts, altAddress } = await buildSendAccounts(
     connection, kp.publicKey, LEG1_DST_EID,
   );
 
-  // ── 4. Build instruction ────────────────────
-  console.log('\n[4/5] Building send instruction...');
-  const to32 = evmAddressTo32(arbOftAddr); // leg 1 recipient = Arbitrum OFT
-
+  const to32 = evmAddressTo32(arbOftAddr);
   const ixData = encodeSendParams({
-    dstEid:       LEG1_DST_EID,
-    to:           to32,
-    amountLd:     AMOUNT_LD,
-    minAmountLd:  SLIPPAGE,
-    extraOptions,             // ← lzCompose(index=0, gas=500k) so executor triggers compose
-    composeMsg,               // ← compose message triggers leg 2
-    nativeFee:    nativeFeeWithBuffer,
-    lzTokenFee:   0n,
+    dstEid:      LEG1_DST_EID,
+    to:          to32,
+    amountLd:    AMOUNT_LD,
+    minAmountLd: SLIPPAGE,
+    extraOptions,                  // lzCompose(gas=500k, value=leg2Fee)
+    composeMsg,                    // ABI-encoded (finalEid, to, minAmt, extraOptions)
+    nativeFee:   nativeFeeWithBuffer,
+    lzTokenFee:  0n,
   });
 
   const [oftEventAuth] = getOftEventAuthority();
@@ -129,20 +179,13 @@ async function main() {
   const cuIx   = ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 });
   const prioIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 5_000 });
 
-  // ── 5. Build, simulate, send ─────────────────
-  console.log('\n[5/5] Sending...');
-  // Fetch ALT (stored in OFTStore.alt — already read by buildSendAccounts)
+  // ── 6. Build, simulate, send ─────────────────
+  console.log('\n[6/6] Building transaction and sending...');
   let altAccount = null;
   if (altAddress) {
-    try {
-      const resp = await connection.getAddressLookupTable(altAddress);
-      altAccount = resp.value;
-      if (altAccount) console.log(`  ALT loaded: ${altAddress.toString()}`);
-    } catch (e) {
-      console.warn('  Could not load ALT:', e.message);
-    }
-  } else {
-    console.warn('  No ALT in OFT store — sending without ALT (may exceed tx size)');
+    const resp = await connection.getAddressLookupTable(altAddress);
+    altAccount = resp.value;
+    if (altAccount) console.log(`  ALT loaded: ${altAddress.toString()}`);
   }
 
   const { blockhash } = await connection.getLatestBlockhash();
@@ -155,7 +198,6 @@ async function main() {
   const tx = new VersionedTransaction(msg);
   tx.sign([kp]);
 
-  // Simulate first
   console.log('Simulating...');
   const sim = await connection.simulateTransaction(tx, { commitment: 'confirmed' });
   if (sim.value.err) {
@@ -171,10 +213,11 @@ async function main() {
   });
   console.log('\n🚀 Sent!');
   console.log('Leg 1 signature:', sig);
-  console.log(`Solscan: https://solscan.io/tx/${sig}`);
-  console.log(`LZ Scan (watch for 2 messages): https://layerzeroscan.com/tx/${sig}`);
-  console.log('\nNote: Leg 2 (Arbitrum→Berachain) is triggered automatically by the compose message.');
-  console.log('Expect 2 messages on LZ Scan.');
+  console.log(`Solscan:  https://solscan.io/tx/${sig}`);
+  console.log(`LZ Scan:  https://layerzeroscan.com/tx/${sig}`);
+  console.log('\nExpect 2 messages on LZ Scan:');
+  console.log('  1. Solana → Arbitrum (lzReceive mints tokens + sendCompose)');
+  console.log('  2. Arbitrum → Celo   (compose callback calls lzSend with msg.value fee)');
 }
 
 main().catch(err => {
