@@ -48,9 +48,7 @@ async function main() {
     throw new Error('Fee quote returned 0 — check simulation');
   }
 
-  // Add 10% buffer to native fee
-  const nativeFeeWithBuffer = nativeFee * 110n / 100n;
-  console.log(`  Fee with 10% buffer: ${nativeFeeWithBuffer} lamports`);
+  console.log(`  Fee: ${nativeFee} lamports (${Number(nativeFee)/1e9} SOL)`);
 
   // ── 2. Build accounts ───────────────────────
   console.log('\n[2/4] Resolving accounts...');
@@ -69,7 +67,7 @@ async function main() {
     minAmountLd: SLIPPAGE,
     extraOptions: Buffer.alloc(0),
     composeMsg:  null,           // no compose for legacy
-    nativeFee:   nativeFeeWithBuffer,
+    nativeFee:   nativeFee,
     lzTokenFee:  0n,
   });
 

@@ -102,12 +102,10 @@ async function main() {
 
   // ── 2. Quote leg 2 fee (NEW Arb OFT → Berachain) ────────────────
   console.log('\n[2/6] Quoting leg 2 fee (NEW Arb OFT → Berachain)...');
-  const leg2FeeWei = await quoteLeg2Fee(FINAL_EID, DST_ADDR, AMOUNT_LD, SLIPPAGE, leg2ExtraOptions);
-  const leg2FeeWithBuffer = leg2FeeWei * 150n / 100n;  // 50% buffer
-  console.log(`  Leg 2 fee: ${leg2FeeWei} wei (${Number(leg2FeeWei)/1e18} ETH)`);
-  console.log(`  With 50% buffer: ${leg2FeeWithBuffer} wei`);
+  const leg2Fee = await quoteLeg2Fee(FINAL_EID, DST_ADDR, AMOUNT_LD, SLIPPAGE, leg2ExtraOptions);
+  console.log(`  Leg 2 fee: ${leg2Fee} wei (${Number(leg2Fee)/1e18} ETH)`);
 
-  if (leg2FeeWei === 0n) {
+  if (leg2Fee === 0n) {
     throw new Error('Leg 2 fee quote returned 0 — quoteSend call may have failed');
   }
 
@@ -123,13 +121,13 @@ async function main() {
   console.log(`  Compose msg (${composeMsg.length} bytes): ${composeMsg.toString('hex').slice(0, 64)}...`);
 
   // ── 4. Build extra_options for leg 1 (lzCompose with fee) ────────
-  // lzCompose(index=0, gas=500k, value=leg2FeeWithBuffer):
+  // lzCompose(index=0, gas=500k, value=leg2Fee):
   //   - gas: executor gas for the compose callback on Arbitrum
   //   - value: ETH forwarded as msg.value to ADAPTIVE_BRIDGE's lzCompose
   //            which uses it to pay the NEW Arb OFT's leg 2 fee
-  const leg1ExtraOptions = encodeLzComposeOption(0, 500_000n, leg2FeeWithBuffer);
+  const leg1ExtraOptions = encodeLzComposeOption(0, 500_000n, leg2Fee);
   console.log(`\n[4/6] Leg 1 extra options (${leg1ExtraOptions.length} bytes): ${leg1ExtraOptions.toString('hex')}`);
-  console.log(`  lzCompose value: ${leg2FeeWithBuffer} wei (${Number(leg2FeeWithBuffer)/1e18} ETH)`);
+  console.log(`  lzCompose value: ${leg2Fee} wei (${Number(leg2Fee)/1e18} ETH)`);
 
   // ── 5. Quote leg 1 fee (Solana → OLD Arb OFT with compose) ──────
   console.log('\n[5/6] Quoting leg 1 fee (Solana → Arb with compose)...');
@@ -139,9 +137,7 @@ async function main() {
   );
   if (nativeFee === 0n) throw new Error('Leg 1 fee quote returned 0 — simulation may have failed.');
 
-  const nativeFeeWithBuffer = nativeFee * 110n / 100n;
   console.log(`  Leg 1 fee: ${nativeFee} lamports (${Number(nativeFee)/1e9} SOL)`);
-  console.log(`  With 10% buffer: ${nativeFeeWithBuffer} lamports`);
 
   // ── 6. Build accounts + instruction ─────────────────────────────
   console.log('\n[6/6] Resolving accounts and building instruction...');
@@ -158,7 +154,7 @@ async function main() {
     minAmountLd: SLIPPAGE,
     extraOptions: leg1ExtraOptions,  // lzCompose(gas=500k, value=leg2Fee)
     composeMsg,                      // full ABI-encoded SendParam for leg 2
-    nativeFee:   nativeFeeWithBuffer,
+    nativeFee:   nativeFee,
     lzTokenFee:  0n,
   });
 
