@@ -80,9 +80,10 @@ function ro(pubkey) {
  * @param {bigint}      amountLd       - amount in 6-decimal units
  * @param {Buffer|null} composeMsg     - null for legacy, buffer for adaptive
  * @param {PublicKey}   [payer]        - fee payer pubkey (any on-curve account with SOL)
+ * @param {Buffer}      [extraOptions] - LZ V2 Type 3 options (e.g. lzCompose gas)
  * @returns {Promise<{nativeFee: bigint, lzFee: bigint}>}
  */
-export async function quoteSend(connection, dstEid, receiverAddr, amountLd, composeMsg = null, payer = null) {
+export async function quoteSend(connection, dstEid, receiverAddr, amountLd, composeMsg = null, payer = null, extraOptions = Buffer.alloc(0)) {
   const to32 = evmAddressTo32(receiverAddr);
 
   const [oftStorePda] = getOftStore();
@@ -166,7 +167,7 @@ export async function quoteSend(connection, dstEid, receiverAddr, amountLd, comp
     to: to32,
     amountLd,
     minAmountLd: amountLd * 99n / 100n,
-    extraOptions: Buffer.alloc(0),
+    extraOptions,
     composeMsg,
     payInLzToken: false,
   });

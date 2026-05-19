@@ -20,7 +20,7 @@ import {
 } from '@solana/web3.js';
 import { readFileSync } from 'fs';
 import { EID, EVM_OFT, PROGRAMS } from '../src/constants.js';
-import { encodeSendParams, evmAddressTo32, encodeComposeMsg } from '../src/borsh.js';
+import { encodeSendParams, evmAddressTo32, encodeComposeMsg, encodeLzComposeOption } from '../src/borsh.js';
 import { buildSendAccounts } from '../src/accounts.js';
 import { quoteSend } from '../src/quote.js';
 import { getOftStore, getOftEventAuthority } from '../src/pda.js';
@@ -60,6 +60,16 @@ async function main() {
   );
   console.log(`  Compose msg (${composeMsg.length} bytes): ${composeMsg.toString('hex').slice(0, 64)}...`);
 
+  // ── 1b. Build extra_options with lzCompose ──
+  // The enforced options for send_and_call only include lzReceive(200k gas).
+  // Without a lzCompose option, the executor delivers the packet to Arbitrum but
+  // never triggers the compose call. We must include it in extra_options.
+  //
+  // LZ V2 Type 3 format: [0x0003][worker blocks...]
+  // lzCompose(index=0, gas=500_000): tells executor to run compose with 500k gas
+  const extraOptions = encodeLzComposeOption(0, 500_000n, 0n);
+  console.log(`  Extra options (${extraOptions.length} bytes): ${extraOptions.toString('hex')}`);
+
   // ── 2. Quote fee for leg 1 ──────────────────
   console.log('\n[2/5] Quoting fee for leg 1 (Solana → Arbitrum with compose)...');
 
@@ -67,8 +77,10 @@ async function main() {
   const arbOftAddr = EVM_OFT[LEG1_DST_EID];
   console.log(`  Sending to Arbitrum OFT: ${arbOftAddr}`);
 
+  // Pass composeMsg so the fee quote reflects the message type (SendOFTAndCall)
+  // and pass extraOptions so the fee accounts for compose execution gas
   const { nativeFee, lzFee } = await quoteSend(
-    connection, LEG1_DST_EID, arbOftAddr, AMOUNT_LD, composeMsg, kp.publicKey,
+    connection, LEG1_DST_EID, arbOftAddr, AMOUNT_LD, composeMsg, kp.publicKey, extraOptions,
   );
   console.log(`  Native fee: ${nativeFee} lamports (${Number(nativeFee)/1e9} SOL)`);
 
@@ -94,7 +106,7 @@ async function main() {
     to:           to32,
     amountLd:     AMOUNT_LD,
     minAmountLd:  SLIPPAGE,
-    extraOptions: Buffer.alloc(0),
+    extraOptions,             // ← lzCompose(index=0, gas=500k) so executor triggers compose
     composeMsg,               // ← compose message triggers leg 2
     nativeFee:    nativeFeeWithBuffer,
     lzTokenFee:   0n,

@@ -148,3 +148,46 @@ export function encodeComposeMsg(finalEid, finalReceiver, minAmountLd, extraOpti
 
   return Buffer.concat([eidBuf, toBuf, minAmtBuf, offsetBuf, lenBuf, padded]);
 }
+
+// ── LZ V2 options encoding ───────────────────
+/**
+ * Encode a Type 3 options buffer containing a single lzCompose option.
+ *
+ * LZ V2 Type 3 format:
+ *   [0x00, 0x03]                          ← type-3 header (2 bytes)
+ *   [workerID: u8]                        ← 1 = Executor
+ *   [optionLen: u16 BE]                   ← length of option data (bytes after this field)
+ *   [optionType: u8]                      ← 3 = lzCompose
+ *   [index: u16 BE]                       ← compose call index (0 = first)
+ *   [gasLimit: u128 BE (16 bytes)]        ← gas for compose execution on destination
+ *   [value: u128 BE (16 bytes)]           ← native drop value (usually 0)
+ *
+ * When combined with enforced options (which already have lzReceive), the executor
+ * will also trigger the compose call after lzReceive completes.
+ *
+ * @param {number}  composeIndex  - compose call index, usually 0
+ * @param {bigint}  gasLimit      - gas for compose on destination chain
+ * @param {bigint}  [value=0n]    - native token value to forward with compose
+ */
+export function encodeLzComposeOption(composeIndex = 0, gasLimit = 500_000n, value = 0n) {
+  // Option data: [type:1][index:2][gasLimit:16][value:16] = 35 bytes
+  const optionData = Buffer.alloc(35);
+  optionData[0] = 3;                              // OPTION_TYPE_LZCOMPOSE
+  optionData.writeUInt16BE(composeIndex, 1);       // compose index
+  optionData.writeBigUInt64BE(0n, 3);             // gasLimit high 64 bits (u128)
+  optionData.writeBigUInt64BE(gasLimit, 11);       // gasLimit low 64 bits
+  optionData.writeBigUInt64BE(0n, 19);            // value high 64 bits
+  optionData.writeBigUInt64BE(value, 27);          // value low 64 bits
+
+  // Worker block: [workerID=1][optionLen:u16 BE][optionData]
+  const block = Buffer.alloc(3);
+  block[0] = 1;                                   // Executor worker ID
+  block.writeUInt16BE(optionData.length, 1);       // = 35 = 0x23
+
+  // Type 3 prefix + worker block + option data
+  return Buffer.concat([
+    Buffer.from([0x00, 0x03]),  // Type 3 header
+    block,
+    optionData,
+  ]);
+}
