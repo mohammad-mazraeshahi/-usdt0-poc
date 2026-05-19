@@ -27,7 +27,7 @@ import {
 } from '@solana/web3.js';
 import { ethers } from 'ethers';
 import { readFileSync } from 'fs';
-import { EID, EVM_OFT, NEW_ARB_OFT, ADAPTIVE_BRIDGE_ARB, PROGRAMS } from '../src/constants.js';
+import { EID, NEW_ARB_OFT, ADAPTIVE_BRIDGE_ARB, PROGRAMS } from '../src/constants.js';
 import { encodeSendParams, evmAddressTo32, encodeComposeMsg, encodeLzComposeOption, encodeLzNativeDropOption } from '../src/borsh.js';
 import { buildSendAccounts } from '../src/accounts.js';
 import { quoteSend } from '../src/quote.js';
@@ -44,8 +44,10 @@ const FINAL_EID    = EID.BERACHAIN;
 const DST_ADDR     = '0x8b5b3F18db50713709da94f88f9f5EEc339D1E4E';  // your EVM wallet
 
 // Amount: 0.001 USDT (6 decimals = 1000 units)
-const AMOUNT_LD  = 1000n;
-const SLIPPAGE   = 990n;  // 1% slippage
+const AMOUNT_LD    = 1000n;
+// minAmountLD: amount after 3 bps fee on each leg. Fee is deterministic (no slippage).
+// fee = floor(amountLD * 3 / 10000)
+const MIN_AMOUNT_LD = AMOUNT_LD - (AMOUNT_LD * 3n / 10000n);
 
 // ── ABI fragments for NEW Arb OFT ────────────
 const OFT_ABI = [
@@ -102,7 +104,7 @@ async function main() {
 
   // ── 2. Quote leg 2 fee (NEW Arb OFT → Berachain) ────────────────
   console.log('\n[2/6] Quoting leg 2 fee (NEW Arb OFT → Berachain)...');
-  const leg2Fee = await quoteLeg2Fee(FINAL_EID, DST_ADDR, AMOUNT_LD, SLIPPAGE, leg2ExtraOptions);
+  const leg2Fee = await quoteLeg2Fee(FINAL_EID, DST_ADDR, AMOUNT_LD, MIN_AMOUNT_LD, leg2ExtraOptions);
   console.log(`  Leg 2 fee: ${leg2Fee} wei (${Number(leg2Fee)/1e18} ETH)`);
 
   if (leg2Fee === 0n) {
@@ -115,7 +117,7 @@ async function main() {
     FINAL_EID,          // dstEid: Berachain (30362)
     DST_ADDR,           // to: recipient on Berachain
     AMOUNT_LD,          // amountLD
-    SLIPPAGE,           // minAmountLD
+    MIN_AMOUNT_LD,
     leg2ExtraOptions,   // extraOptions: native drop for Berachain gas
   );
   console.log(`  Compose msg (${composeMsg.length} bytes): ${composeMsg.toString('hex').slice(0, 64)}...`);
@@ -151,7 +153,7 @@ async function main() {
     dstEid:      LEG1_DST_EID,
     to:          to32,
     amountLd:    AMOUNT_LD,
-    minAmountLd: SLIPPAGE,
+    minAmountLd: MIN_AMOUNT_LD,
     extraOptions: leg1ExtraOptions,  // lzCompose(gas=500k, value=leg2Fee)
     composeMsg,                      // full ABI-encoded SendParam for leg 2
     nativeFee:   nativeFee,

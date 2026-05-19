@@ -24,9 +24,11 @@ const WALLET_PATH = '/root/usdt0-poc/test-wallet.json';
 const DST_EID    = EID.ETH;
 const DST_ADDR   = '0x8b5b3F18db50713709da94f88f9f5EEc339D1E4E';  // your EVM wallet
 
-// Amount: 0.001 USDT = 1000 micro-USDT
-const AMOUNT_LD  = 1000n;   // 1000 = 0.001 USDT (6 decimals)
-const SLIPPAGE   = 990n;    // min = 0.99x (1% slippage tolerance)
+// Amount: 0.001 USDT (6 decimals = 1000 units)
+const AMOUNT_LD    = 1000n;
+// minAmountLD: amount after 3 bps fee. Fee is deterministic (no slippage).
+// fee = floor(amountLD * 3 / 10000)
+const MIN_AMOUNT_LD = AMOUNT_LD - (AMOUNT_LD * 3n / 10000n);
 
 // ── Main ──────────────────────────────────────
 async function main() {
@@ -38,16 +40,10 @@ async function main() {
 
   // ── 1. Quote fee ────────────────────────────
   console.log(`\n[1/4] Quoting fee for ${Number(AMOUNT_LD)/1e6} USDT → ETH (EID ${DST_EID})...`);
-  const { nativeFee, lzFee } = await quoteSend(
+  const { nativeFee } = await quoteSend(
     connection, DST_EID, DST_ADDR, AMOUNT_LD, null, kp.publicKey,
   );
-  console.log(`  Native fee: ${nativeFee} lamports (${Number(nativeFee)/1e9} SOL)`);
-  console.log(`  LZ token fee: ${lzFee}`);
-
-  if (nativeFee === 0n) {
-    throw new Error('Fee quote returned 0 — check simulation');
-  }
-
+  if (nativeFee === 0n) throw new Error('Fee quote returned 0 — check simulation');
   console.log(`  Fee: ${nativeFee} lamports (${Number(nativeFee)/1e9} SOL)`);
 
   // ── 2. Build accounts ───────────────────────
@@ -64,7 +60,7 @@ async function main() {
     dstEid:      DST_EID,
     to:          to32,
     amountLd:    AMOUNT_LD,
-    minAmountLd: SLIPPAGE,
+    minAmountLd: MIN_AMOUNT_LD,
     extraOptions: Buffer.alloc(0),
     composeMsg:  null,           // no compose for legacy
     nativeFee:   nativeFee,
