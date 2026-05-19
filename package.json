@@ -1,0 +1,17 @@
+{
+  "name": "usdt0-oft-poc",
+  "version": "1.0.0",
+  "description": "USDT0 OFT cross-chain transfer POC — Solana to EVM (legacy & adaptive)",
+  "type": "module",
+  "scripts": {
+    "diagnose":      "node scripts/diagnose.js",
+    "send-legacy":   "node scripts/send-legacy.js",
+    "send-adaptive": "node scripts/send-adaptive.js"
+  },
+  "dependencies": {
+    "@layerzerolabs/lz-solana-sdk-v2": "latest",
+    "@solana/web3.js": "^1.95.8",
+    "@solana/spl-token": "^0.4.9",
+    "bs58": "^6.0.0"
+  }
+}
