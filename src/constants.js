@@ -61,7 +61,7 @@ export const EVM_OFT = {
 
 // NEW Arbitrum OFT — connects to native USDT0 OFT chains (Berachain, Optimism, etc.)
 // Used for quoting leg 2 fee (Arb → Berachain)
-export const NEW_ARB_OFT = '0x14E4A1B13bf7f943c8ff7c51fb60fa964a298d92';
+export const NEW_ARB_OFT = '0x14E4A1B13bf7F943c8ff7C51fb60FA964A298D92';
 
 // USDT0 Adaptive Bridge on Arbitrum
 // This contract is the compose receiver for adaptive sends.

@@ -25,6 +25,7 @@ import {
   TransactionMessage, VersionedTransaction,
   TransactionInstruction, ComputeBudgetProgram,
 } from '@solana/web3.js';
+import { ethers } from 'ethers';
 import { readFileSync } from 'fs';
 import { EID, EVM_OFT, NEW_ARB_OFT, ADAPTIVE_BRIDGE_ARB, PROGRAMS } from '../src/constants.js';
 import { encodeSendParams, evmAddressTo32, encodeComposeMsg, encodeLzComposeOption, encodeLzNativeDropOption } from '../src/borsh.js';
@@ -46,11 +47,12 @@ const DST_ADDR     = '0x8b5b3F18db50713709da94f88f9f5EEc339D1E4E';  // your EVM 
 const AMOUNT_LD  = 1000n;
 const SLIPPAGE   = 990n;  // 1% slippage
 
-// quoteSend function selector on EVM OFT
-// keccak256("quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)")[0:4]
-const QUOTE_SEND_SEL = '0x3b6f743b';
+// ── ABI fragments for NEW Arb OFT ────────────
+const OFT_ABI = [
+  'function quoteSend((uint32 dstEid, bytes32 to, uint256 amountLD, uint256 minAmountLD, bytes extraOptions, bytes composeMsg, bytes oftCmd) sendParam, bool payInLzToken) view returns (uint256 nativeFee, uint256 lzTokenFee)',
+];
 
-// ── Quote leg 2 fee (NEW Arb OFT → Berachain) via eth_call ────
+// ── Quote leg 2 fee (NEW Arb OFT → Berachain) ─
 /**
  * Query the NEW Arbitrum USDT0 OFT's quoteSend to get the fee for leg 2.
  * The ADAPTIVE_BRIDGE on Arbitrum uses msg.value (= this fee) to pay for leg 2.
@@ -63,45 +65,21 @@ const QUOTE_SEND_SEL = '0x3b6f743b';
  * @returns {Promise<bigint>}   - nativeFee in wei
  */
 async function quoteLeg2Fee(finalEid, toAddr, amountLd, minAmountLd, extraOptions = Buffer.alloc(0)) {
-  function pad32(n) { return n.toString(16).padStart(64, '0'); }
+  const provider = new ethers.JsonRpcProvider(ARB_RPC);
+  const oft      = new ethers.Contract(NEW_ARB_OFT, OFT_ABI, provider);
 
-  // extraOptions as hex (dynamic bytes)
-  const extraHex    = extraOptions.toString('hex');
-  const extraOffset = 7 * 32;  // 7 head slots × 32 = 224 = 0xe0
+  const sendParam = {
+    dstEid:       finalEid,
+    to:           ethers.zeroPadValue(toAddr, 32),
+    amountLD:     amountLd,
+    minAmountLD:  minAmountLd,
+    extraOptions: '0x' + extraOptions.toString('hex'),
+    composeMsg:   '0x',
+    oftCmd:       '0x',
+  };
 
-  const tupleHead =
-    pad32(finalEid) +                                        // dstEid
-    toAddr.toLowerCase().replace('0x','').padStart(64,'0') + // to (bytes32)
-    pad32(Number(amountLd)) +                                // amountLD
-    pad32(Number(minAmountLd)) +                             // minAmountLD
-    pad32(extraOffset) +                                     // extraOptions offset = 7*32
-    pad32(extraOffset + 32 + Math.ceil(extraOptions.length/32)*32) + // composeMsg offset
-    pad32(extraOffset + 32 + Math.ceil(extraOptions.length/32)*32 + 32) + // oftCmd offset
-    pad32(extraOptions.length) +                             // extraOptions.length
-    extraHex.padEnd(Math.ceil(extraOptions.length / 32) * 64, '0') + // extraOptions data
-    pad32(0) +                                               // composeMsg.length = 0
-    pad32(0);                                                // oftCmd.length = 0
-
-  const calldata =
-    QUOTE_SEND_SEL +
-    pad32(64) +      // offset to SendParam = 64 (2 words: selector offset + bool)
-    pad32(0) +       // bool payInLzToken = false
-    tupleHead;
-
-  const res = await fetch(ARB_RPC, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'eth_call',
-      params: [{ to: NEW_ARB_OFT, data: calldata }, 'latest'],
-    }),
-  }).then(r => r.json());
-
-  if (res.error) throw new Error(`quoteLeg2 RPC error: ${res.error.message}`);
-
-  // Decode result: MessagingFee { nativeFee: uint256, lzTokenFee: uint256 }
-  const nativeFeeHex = res.result.slice(2, 66);   // first 32 bytes
-  return BigInt('0x' + nativeFeeHex);
+  const [nativeFee] = await oft.quoteSend(sendParam, false);
+  return nativeFee;
 }
 
 // ── Main ──────────────────────────────────────
